@@ -2,36 +2,36 @@
 ###############################################################################
 # deploy-observability-stack.sh
 #
-# Универсальное развёртывание observability-стека на Ubuntu 24.04 LTS:
+# Universal deployment of the observability stack on Ubuntu 24.04 LTS:
 #   - Prometheus
 #   - Alertmanager
-#   - Blackbox Exporter (в т.ч. пробинг HTTPS с самоподписанными сертификатами)
+#   - Blackbox Exporter (including HTTPS probing with self-signed certificates)
 #   - Node Exporter
 #   - Postgres Exporter
 #   - Loki
-#   - Grafana (с автопровижининг datasources)
+#   - Grafana (with datasource auto-provisioning)
 #
-# Все сервисы разворачиваются через docker-compose (docker compose plugin).
+# All services are deployed via docker-compose (docker compose plugin).
 #
-# Использование:
+# Usage:
 #   sudo bash deploy-observability-stack.sh
 #
-# Повторный запуск безопасен (идемпотентен): существующий .env не
-# перезаписывается, конфиги пересоздаются, данные хранятся в именованных
-# docker-томах и не теряются.
+# Re-running is safe (idempotent): the existing .env file is not overwritten,
+# configurations are recreated, and data is stored in named Docker volumes
+# without being lost.
 ###############################################################################
 
 set -euo pipefail
 
 # ----------------------------------------------------------------------------
-# 0. Базовые настройки / переменные
+# 0. Basic Settings / Variables
 # ----------------------------------------------------------------------------
 
 BASE_DIR="/opt/observability"
 COMPOSE_FILE="${BASE_DIR}/docker-compose.yml"
 ENV_FILE="${BASE_DIR}/.env"
 
-# Версии образов (зафиксированы для предсказуемости и стабильности стека)
+# Image versions (pinned for predictability and stack stability)
 PROMETHEUS_VERSION="v2.53.0"
 ALERTMANAGER_VERSION="v0.27.0"
 BLACKBOX_VERSION="v0.25.0"
@@ -40,7 +40,7 @@ POSTGRES_EXPORTER_VERSION="v0.15.0"
 LOKI_VERSION="2.9.8"
 GRAFANA_VERSION="11.1.0"
 
-# Публикуемые наружу порты (можно поменять до запуска через .env)
+# Externally published ports (can be changed via .env before startup)
 GRAFANA_PORT_DEFAULT=3000
 PROMETHEUS_PORT_DEFAULT=9090
 ALERTMANAGER_PORT_DEFAULT=9093
@@ -50,7 +50,7 @@ POSTGRES_EXPORTER_PORT_DEFAULT=9187
 LOKI_PORT_DEFAULT=3100
 
 # ----------------------------------------------------------------------------
-# Утилиты логирования
+# Logging Utilities
 # ----------------------------------------------------------------------------
 
 c_green='\033[0;32m'; c_yellow='\033[1;33m'; c_red='\033[0;31m'; c_reset='\033[0m'
@@ -60,12 +60,12 @@ err()  { echo -e "${c_red}[ERROR]${c_reset} $*" >&2; }
 die()  { err "$*"; exit 1; }
 
 # ----------------------------------------------------------------------------
-# 1. Проверки окружения
+# 1. Environment Checks
 # ----------------------------------------------------------------------------
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        die "Скрипт нужно запускать от root (используйте sudo). Пример: sudo bash $0"
+        die "This script must be run as root (use sudo). Example: sudo bash $0"
     fi
 }
 
@@ -74,60 +74,60 @@ check_os() {
         # shellcheck disable=SC1091
         source /etc/os-release
         if [[ "${ID:-}" != "ubuntu" ]]; then
-            warn "Обнаружена ОС '${ID:-unknown}', скрипт рассчитан на Ubuntu 24.04 LTS. Продолжаю на свой страх и риск..."
+            warn "Detected OS '${ID:-unknown}'; this script is designed for Ubuntu 24.04 LTS. Proceeding at your own risk..."
         elif [[ "${VERSION_ID:-}" != "24.04" ]]; then
-            warn "Обнаружена Ubuntu ${VERSION_ID:-unknown}, скрипт протестирован на 24.04. Продолжаю..."
+            warn "Detected Ubuntu ${VERSION_ID:-unknown}; this script is tested on 24.04. Proceeding..."
         else
-            log "Ubuntu 24.04 LTS подтверждена."
+            log "Ubuntu 24.04 LTS confirmed."
         fi
     else
-        warn "Не удалось определить ОС (/etc/os-release отсутствует). Продолжаю..."
+        warn "Could not determine OS (/etc/os-release is missing). Proceeding..."
     fi
 }
 
 # ----------------------------------------------------------------------------
-# 2. Установка Docker + docker compose plugin
+# 2. Docker + Docker Compose Plugin Installation
 # ----------------------------------------------------------------------------
 
 install_docker() {
     if command -v docker &>/dev/null && docker compose version &>/dev/null; then
-        log "Docker и docker compose plugin уже установлены: $(docker --version)"
+        log "Docker and Docker Compose plugin are already installed: $(docker --version)"
         return 0
     fi
 
-    log "Устанавливаю Docker и Docker Compose из штатных репозиториев Ubuntu (docker.io + docker-compose-v2)..."
+    log "Installing Docker and Docker Compose from standard Ubuntu repositories (docker.io + docker-compose-v2)..."
 
-    # На некоторых сборках Ubuntu 24.04 хук command-not-found (cnf-update-db),
-    # который apt дёргает после успешного update/install, падает с Segmentation fault.
-    # Сама операция apt при этом отрабатывает штатно, но из-за ненулевого кода выхода
-    # хука apt-get возвращает ошибку и скрипт падает под set -e. Отключаем хук —
-    # для headless-автоматизации он не нужен.
+    # On some Ubuntu 24.04 builds, the command-not-found (cnf-update-db) hook,
+    # which apt triggers after a successful update/install, fails with a Segmentation fault.
+    # The apt operation itself completes successfully, but due to the non-zero exit code
+    # of the hook, apt-get returns an error, causing the script to fail under set -e.
+    # We disable this hook as it is unnecessary for headless automation.
     if [[ ! -f /etc/apt/apt.conf.d/99-disable-post-invoke-hooks ]]; then
         cat <<'EOF' > /etc/apt/apt.conf.d/99-disable-post-invoke-hooks
 #clear APT::Update::Post-Invoke-Success;
 EOF
-        log "Отключён apt post-invoke хук command-not-found (известный segfault на Ubuntu 24.04)."
+        log "Disabled the command-not-found apt post-invoke hook (known segfault on Ubuntu 24.04)."
     fi
 
     apt-get update -y
-    # docker.io — Docker Engine из репозиториев Ubuntu (universe)
-    # docker-compose-v2 — плагин "docker compose" (v2) из репозиториев Ubuntu
+    # docker.io — Docker Engine from Ubuntu repositories (universe)
+    # docker-compose-v2 — "docker compose" plugin (v2) from Ubuntu repositories
     apt-get install -y docker.io docker-compose-v2
 
     systemctl enable --now docker
 
-    # Добавляем пользователя, который вызвал sudo, в группу docker (если применимо)
+    # Add the user who invoked sudo to the docker group (if applicable)
     if [[ -n "${SUDO_USER:-}" ]] && [[ "${SUDO_USER}" != "root" ]]; then
         usermod -aG docker "${SUDO_USER}" || true
-        log "Пользователь '${SUDO_USER}' добавлен в группу docker (перелогиньтесь для применения)."
+        log "User '${SUDO_USER}' added to the docker group (re-login to apply changes)."
     fi
 
-    log "Docker установлен: $(docker --version)"
+    log "Docker installed: $(docker --version)"
     log "Docker Compose plugin: $(docker compose version)"
 }
 
 # ----------------------------------------------------------------------------
-# 3. Определение IP хоста (для node-exporter, который работает в host network)
+# 3. Host IP Detection (for node-exporter, which runs in the host network)
 # ----------------------------------------------------------------------------
 
 detect_host_ip() {
@@ -135,17 +135,17 @@ detect_host_ip() {
     ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
     if [[ -z "${ip}" ]]; then
         ip="127.0.0.1"
-        warn "Не удалось автоматически определить IP хоста, использую 127.0.0.1. Поправьте вручную в ${BASE_DIR}/prometheus/prometheus.yml"
+        warn "Could not automatically detect host IP, using 127.0.0.1. Please fix manually in ${BASE_DIR}/prometheus/prometheus.yml"
     fi
     echo "${ip}"
 }
 
 # ----------------------------------------------------------------------------
-# 4. Создание структуры каталогов
+# 4. Directory Structure Creation
 # ----------------------------------------------------------------------------
 
 create_dirs() {
-    log "Создаю структуру каталогов в ${BASE_DIR}..."
+    log "Creating directory structure in ${BASE_DIR}..."
     mkdir -p \
         "${BASE_DIR}/prometheus" \
         "${BASE_DIR}/alertmanager" \
@@ -157,31 +157,31 @@ create_dirs() {
 }
 
 # ----------------------------------------------------------------------------
-# 5. Генерация .env (создаётся один раз, дальше не перезаписывается)
+# 5. .env Generation (created once, not overwritten afterwards)
 # ----------------------------------------------------------------------------
 
-# Добавляет переменную в существующий .env, если её там ещё нет (не трогает уже заданные значения)
+# Adds a variable to the existing .env if it doesn't exist yet (leaves existing values untouched)
 ensure_env_var() {
     local key="$1" default_value="$2" comment="${3:-}"
     if ! grep -qE "^${key}=" "${ENV_FILE}" 2>/dev/null; then
         [[ -n "$comment" ]] && echo -e "\n${comment}" >> "${ENV_FILE}"
         echo "${key}=${default_value}" >> "${ENV_FILE}"
-        log "В ${ENV_FILE} добавлена новая переменная: ${key}"
+        log "Added new variable to ${ENV_FILE}: ${key}"
     fi
 }
 
 generate_env() {
     if [[ -f "${ENV_FILE}" ]]; then
-        log ".env уже существует, дополняю недостающими переменными (существующие значения не трогаю): ${ENV_FILE}"
+        log ".env already exists, supplementing with missing variables (existing values untouched): ${ENV_FILE}"
         ensure_env_var "TELEGRAM_BOT_TOKEN" "CHANGE_ME_telegram_bot_token" \
-            "# --- Alertmanager: уведомления в Telegram (добавлено при апгрейде) ---"
+            "# --- Alertmanager: Telegram notifications (added during upgrade) ---"
         ensure_env_var "TELEGRAM_CHAT_ID" "CHANGE_ME_telegram_chat_id"
         # shellcheck disable=SC1090
         source "${ENV_FILE}"
         return 0
     fi
 
-    log "Генерирую ${ENV_FILE}..."
+    log "Generating ${ENV_FILE}..."
 
     local host_ip grafana_admin_pass pg_exporter_pass
     host_ip="$(detect_host_ip)"
@@ -190,10 +190,10 @@ generate_env() {
 
     cat <<EOF > "${ENV_FILE}"
 ###############################################################################
-# Конфигурация observability-стека. Отредактируйте под своё окружение.
+# Observability stack configuration. Edit to suit your environment.
 ###############################################################################
 
-# --- Порты, публикуемые на хосте ---
+# --- Ports published on the host ---
 GRAFANA_PORT=${GRAFANA_PORT_DEFAULT}
 PROMETHEUS_PORT=${PROMETHEUS_PORT_DEFAULT}
 ALERTMANAGER_PORT=${ALERTMANAGER_PORT_DEFAULT}
@@ -202,58 +202,58 @@ NODE_EXPORTER_PORT=${NODE_EXPORTER_PORT_DEFAULT}
 POSTGRES_EXPORTER_PORT=${POSTGRES_EXPORTER_PORT_DEFAULT}
 LOKI_PORT=${LOKI_PORT_DEFAULT}
 
-# --- IP хоста, на котором крутится стек (нужно node-exporter'у, т.к. он в host network) ---
+# --- Host IP where the stack runs (needed by node-exporter because it uses the host network) ---
 HOST_IP=${host_ip}
 
 # --- Grafana ---
 GF_SECURITY_ADMIN_USER=admin
 GF_SECURITY_ADMIN_PASSWORD=${grafana_admin_pass}
 
-# --- Alertmanager: уведомления в Telegram ---
-# 1) Создайте бота через @BotFather, получите TELEGRAM_BOT_TOKEN (вида 123456:ABC-DEF...)
-# 2) Узнайте chat_id: добавьте бота в нужный чат/канал и откройте
-#    https://api.telegram.org/bot<TOKEN>/getUpdates после отправки любого сообщения в чат,
-#    либо используйте @userinfobot / @getmyid_bot для личных чатов.
-# 3) Для канала chat_id обычно отрицательный (например -1001234567890).
+# --- Alertmanager: Telegram notifications ---
+# 1) Create a bot via @BotFather and get TELEGRAM_BOT_TOKEN (format 123456:ABC-DEF...)
+# 2) Find chat_id: add the bot to the desired chat/channel and open
+#    https://api.telegram.org/bot<TOKEN>/getUpdates after sending any message to the chat,
+#    or use @userinfobot / @getmyid_bot for private chats.
+# 3) For channels, chat_id is typically negative (e.g., -1001234567890).
 TELEGRAM_BOT_TOKEN=CHANGE_ME_telegram_bot_token
 TELEGRAM_CHAT_ID=CHANGE_ME_telegram_chat_id
 
-# --- Postgres Exporter: строка подключения к вашей БД ---
-# ЗАМЕНИТЕ на реальные хост/порт/базу/пользователя/пароль.
-# Пользователь БД должен иметь права минимум pg_monitor (PostgreSQL 10+):
+# --- Postgres Exporter: connection string to your DB ---
+# REPLACE with your real host/port/database/user/password.
+# The DB user must have at least pg_monitor privileges (PostgreSQL 10+):
 #   CREATE USER postgres_exporter WITH PASSWORD 'strong_password';
 #   GRANT pg_monitor TO postgres_exporter;
 POSTGRES_EXPORTER_DSN=postgresql://postgres_exporter:${pg_exporter_pass}@192.168.1.50:5432/postgres?sslmode=disable
 
-# --- Blackbox Exporter: список HTTP(S) целей для проверки, через запятую ---
-# Пробуются по умолчанию модулем https_selfsigned (допускает самоподписанные сертификаты)
-# и http_2xx для обычного http. ЗАМЕНИТЕ на свои реальные адреса/сайты.
+# --- Blackbox Exporter: comma-separated list of HTTP(S) targets to check ---
+# Probed by default using the https_selfsigned module (allows self-signed certificates)
+# and http_2xx for standard http. REPLACE with your actual addresses/sites.
 BLACKBOX_TARGETS=https://192.168.1.10,https://192.168.1.20:8443,http://192.168.1.30:80
 
-# --- Список хостов node-exporter, если у вас их несколько (через запятую, host:port) ---
-# По умолчанию сюда подставляется HOST_IP:9100 (сам сервер). Добавьте другие хосты при необходимости.
+# --- List of node-exporter hosts, if you have multiple (comma-separated, host:port) ---
+# Defaults to HOST_IP:9100 (the server itself). Add other hosts if necessary.
 NODE_EXPORTER_TARGETS=${host_ip}:9100
 
-# --- Данные хранения (retention) Prometheus ---
+# --- Prometheus data retention ---
 PROMETHEUS_RETENTION=30d
 EOF
 
     chmod 600 "${ENV_FILE}"
-    log "Файл .env создан. Сгенерированный пароль Grafana admin: ${grafana_admin_pass}"
-    warn "ОБЯЗАТЕЛЬНО отредактируйте POSTGRES_EXPORTER_DSN и BLACKBOX_TARGETS в ${ENV_FILE} под ваши реальные адреса, затем перезапустите скрипт."
+    log ".env file created. Generated Grafana admin password: ${grafana_admin_pass}"
+    warn "MAKE SURE to edit POSTGRES_EXPORTER_DSN and BLACKBOX_TARGETS in ${ENV_FILE} to match your actual addresses, then re-run the script."
 }
 
 # ----------------------------------------------------------------------------
-# 6. Генерация конфигурации Prometheus
+# 6. Prometheus Configuration Generation
 # ----------------------------------------------------------------------------
 
 generate_prometheus_config() {
-    log "Генерирую prometheus.yml..."
+    log "Generating prometheus.yml..."
 
     # shellcheck disable=SC1090
     source "${ENV_FILE}"
 
-    # Формируем YAML-список целей blackbox из BLACKBOX_TARGETS (через запятую)
+    # Build the YAML list of blackbox targets from BLACKBOX_TARGETS (comma-separated)
     local blackbox_targets_yaml=""
     IFS=',' read -ra _BB_ARR <<< "${BLACKBOX_TARGETS}"
     for t in "${_BB_ARR[@]}"; do
@@ -264,7 +264,7 @@ generate_prometheus_config() {
     [[ -z "$blackbox_targets_yaml" ]] && blackbox_targets_yaml="          []"$'\n'
     blackbox_targets_yaml="${blackbox_targets_yaml%$'\n'}"
 
-    # Формируем YAML-список целей node-exporter
+    # Build the YAML list of node-exporter targets
     local node_targets_yaml=""
     IFS=',' read -ra _NE_ARR <<< "${NODE_EXPORTER_TARGETS}"
     for t in "${_NE_ARR[@]}"; do
@@ -275,7 +275,7 @@ generate_prometheus_config() {
     [[ -z "$node_targets_yaml" ]] && node_targets_yaml="          []"$'\n'
     node_targets_yaml="${node_targets_yaml%$'\n'}"
 
-    # Список для ICMP (только хост/IP, без :port) — на основе NODE_EXPORTER_TARGETS
+    # List for ICMP (host/IP only, without :port) — based on NODE_EXPORTER_TARGETS
     local node_targets_hosts_only=""
     for t in "${_NE_ARR[@]}"; do
         t="$(echo "$t" | xargs)"
@@ -285,8 +285,8 @@ generate_prometheus_config() {
     [[ -z "$node_targets_hosts_only" ]] && node_targets_hosts_only="          []"$'\n'
     node_targets_hosts_only="${node_targets_hosts_only%$'\n'}"
 
-    # Пишем итоговый файл напрямую bash-heredoc'ом (без внешних интерпретаторов —
-    # устойчиво к проблемам платформы вроде сегфолтов python3/системных бинарников).
+    # Write the resulting file directly using a bash heredoc (without external interpreters —
+    # resilient to platform issues such as python3 / system binary segfaults).
     cat <<EOF > "${BASE_DIR}/prometheus/prometheus.yml"
 global:
   scrape_interval: 15s
@@ -304,7 +304,7 @@ rule_files:
 
 scrape_configs:
 
-  # Сам Prometheus
+  # Prometheus itself
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]
@@ -314,7 +314,7 @@ scrape_configs:
     static_configs:
       - targets: ["alertmanager:9093"]
 
-  # Node Exporter (метрики хоста/хостов)
+  # Node Exporter (host metrics)
   - job_name: "node-exporter"
     static_configs:
       - targets:
@@ -325,16 +325,16 @@ ${node_targets_yaml}
     static_configs:
       - targets: ["postgres-exporter:9187"]
 
-  # Loki (собственные метрики)
+  # Loki (internal metrics)
   - job_name: "loki"
     static_configs:
       - targets: ["loki:3100"]
 
-  # Blackbox Exporter: HTTP(S)-цели, в т.ч. с самоподписанными сертификатами.
-  # Модуль https_selfsigned безопасен и для обычных http:// целей — TLS-настройки
-  # просто не применяются, когда схема адреса не https. Поэтому одного job'а
-  # достаточно для всех целей из BLACKBOX_TARGETS — отдельный job для "строгого"
-  # HTTP только задваивал бы метрики по одному и тому же таргету.
+  # Blackbox Exporter: HTTP(S) targets, including those with self-signed certificates.
+  # The https_selfsigned module is also safe for regular http:// targets — TLS settings
+  # are simply not applied when the address scheme is not https. Therefore, a single job
+  # is sufficient for all targets from BLACKBOX_TARGETS — a separate job for "strict"
+  # HTTP would only duplicate metrics for the exact same target.
   - job_name: "blackbox-https-selfsigned"
     metrics_path: /probe
     params:
@@ -350,7 +350,7 @@ ${blackbox_targets_yaml}
       - target_label: __address__
         replacement: blackbox-exporter:9115
 
-  # Blackbox Exporter: ICMP ping (требует cap_add: NET_RAW у контейнера)
+  # Blackbox Exporter: ICMP ping (requires cap_add: NET_RAW on the container)
   - job_name: "blackbox-icmp"
     metrics_path: /probe
     params:
@@ -367,7 +367,7 @@ ${node_targets_hosts_only}
         replacement: blackbox-exporter:9115
 EOF
 
-    # Пустой файл правил алертинга (можно наполнить своими правилами позже)
+    # Empty alert rules file (can be populated with custom rules later)
     if [[ ! -f "${BASE_DIR}/prometheus/alert.rules.yml" ]]; then
         cat <<'EOF' > "${BASE_DIR}/prometheus/alert.rules.yml"
 groups:
@@ -380,7 +380,7 @@ groups:
           severity: critical
         annotations:
           summary: "Instance {{ $labels.instance }} down"
-          description: "{{ $labels.instance }} (job {{ $labels.job }}) недоступен более 2 минут."
+          description: "{{ $labels.instance }} (job {{ $labels.job }}) has been unreachable for more than 2 minutes."
 
       - alert: HighNodeCPU
         expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
@@ -388,8 +388,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Высокая загрузка CPU на {{ $labels.instance }}"
-          description: "Загрузка CPU превышает 90% более 5 минут."
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage exceeds 90% for more than 5 minutes."
 
       - alert: HighNodeMemory
         expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 90
@@ -397,8 +397,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Высокое потребление памяти на {{ $labels.instance }}"
-          description: "Использование памяти превышает 90% более 5 минут."
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage exceeds 90% for more than 5 minutes."
 
       - alert: BlackboxProbeFailed
         expr: probe_success == 0
@@ -406,23 +406,23 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Probe failed для {{ $labels.instance }}"
-          description: "Blackbox probe для {{ $labels.instance }} не проходит более 2 минут."
+          summary: "Probe failed for {{ $labels.instance }}"
+          description: "Blackbox probe for {{ $labels.instance }} has been failing for more than 2 minutes."
 EOF
     fi
 }
 
 # ----------------------------------------------------------------------------
-# 7. Генерация конфигурации Alertmanager
+# 7. Alertmanager Configuration Generation
 # ----------------------------------------------------------------------------
 
 generate_alertmanager_config() {
     # shellcheck disable=SC1090
     source "${ENV_FILE}"
 
-    # chat_id в Telegram-конфиге Alertmanager должен быть валидным числом (может быть отрицательным
-    # для каналов/супергрупп). Если токен/chat_id ещё не заданы (плейсхолдеры) или chat_id не число —
-    # генерируем безопасный null-receiver, чтобы Alertmanager не ушёл в crash-loop из-за невалидного конфига.
+    # The chat_id in Alertmanager's Telegram config must be a valid number (can be negative
+    # for channels/supergroups). If the token/chat_id are not yet set (placeholders) or chat_id is not a number —
+    # generate a safe null-receiver so Alertmanager doesn't enter a crash loop due to an invalid config.
     local telegram_ready=true
     if [[ "${TELEGRAM_BOT_TOKEN}" == "CHANGE_ME_telegram_bot_token" || -z "${TELEGRAM_BOT_TOKEN}" ]]; then
         telegram_ready=false
@@ -435,7 +435,7 @@ generate_alertmanager_config() {
     fi
 
     if [[ "${telegram_ready}" == "true" ]]; then
-        log "Генерирую alertmanager.yml (получатель: Telegram, chat_id=${TELEGRAM_CHAT_ID})..."
+        log "Generating alertmanager.yml (recipient: Telegram, chat_id=${TELEGRAM_CHAT_ID})..."
         cat <<EOF > "${BASE_DIR}/alertmanager/alertmanager.yml"
 global:
   resolve_timeout: 5m
@@ -456,16 +456,16 @@ receivers:
         send_resolved: true
         message: |
           {{- if eq .Status "firing" -}}
-          🚨 <b>[ПРОБЛЕМА] {{ .CommonLabels.alertname }}</b>
+          🚨 <b>[ISSUE] {{ .CommonLabels.alertname }}</b>
           {{- else -}}
-          ✅ <b>[ВОССТАНОВЛЕНИЕ] {{ .CommonLabels.alertname }}</b>
+          ✅ <b>[RESOLVED] {{ .CommonLabels.alertname }}</b>
           {{- end }}
           {{ range .Alerts }}
-          <b>Узел:</b> {{ .Labels.instance | html }}
-          <b>Джоб:</b> {{ .Labels.job | html }}
-          <b>Критичность:</b> {{ .Labels.severity | html }}
-          <b>Описание:</b> {{ .Annotations.description | html }}
-          <b>Время изменения:</b> {{ (.StartsAt.Add 10800000000000).Format "2006-01-02 15:04:05" }} MSK
+          <b>Node:</b> {{ .Labels.instance | html }}
+          <b>Job:</b> {{ .Labels.job | html }}
+          <b>Severity:</b> {{ .Labels.severity | html }}
+          <b>Description:</b> {{ .Annotations.description | html }}
+          <b>Change Time:</b> {{ (.StartsAt.Add 10800000000000).Format "2006-01-02 15:04:05" }} MSK
           {{ end }}
 
 inhibit_rules:
@@ -476,9 +476,9 @@ inhibit_rules:
     equal: ["alertname", "instance"]
 EOF
     else
-        warn "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID не заданы или некорректны в ${ENV_FILE}."
-        warn "Генерирую alertmanager.yml с null-receiver (алерты будут накапливаться, но НЕ отправляться), чтобы избежать crash-loop."
-        warn "После заполнения переменных перезапустите скрипт — конфиг переключится на реальный Telegram-receiver."
+        warn "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set or are invalid in ${ENV_FILE}."
+        warn "Generating alertmanager.yml with a null-receiver (alerts will accumulate but NOT be sent) to avoid a crash loop."
+        warn "Once you fill in the variables, re-run the script — the config will switch to the actual Telegram receiver."
         cat <<'EOF' > "${BASE_DIR}/alertmanager/alertmanager.yml"
 global:
   resolve_timeout: 5m
@@ -491,8 +491,8 @@ route:
   repeat_interval: 1h
 
 receivers:
-  # ЗАПОЛНИТЕ TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env и перезапустите скрипт —
-  # автоматически подключится реальный Telegram-receiver.
+  # FILL IN TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env and re-run the script —
+  # the real Telegram receiver will be connected automatically.
   - name: "null-receiver"
 
 inhibit_rules:
@@ -506,27 +506,27 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# 8. Генерация конфигурации Blackbox Exporter (с поддержкой self-signed TLS)
+# 8. Blackbox Exporter Configuration Generation (with self-signed TLS support)
 # ----------------------------------------------------------------------------
 
 generate_blackbox_config() {
-    log "Генерирую blackbox.yml (с модулем для самоподписанных сертификатов)..."
+    log "Generating blackbox.yml (with self-signed certificate module)..."
     cat <<'EOF' > "${BASE_DIR}/blackbox/blackbox.yml"
 modules:
 
-  # Обычный HTTP(S) с валидацией сертификата (для сайтов с нормальными CA-сертификатами)
+  # Standard HTTP(S) with certificate validation (for sites with proper CA certificates)
   http_2xx:
     prober: http
     timeout: 5s
     http:
       valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
-      valid_status_codes: []   # по умолчанию 2xx
+      valid_status_codes: []   # defaults to 2xx
       method: GET
       preferred_ip_protocol: "ip4"
       tls_config:
         insecure_skip_verify: false
 
-  # HTTPS с самоподписанными / недоверенными сертификатами — TLS-верификация отключена
+  # HTTPS with self-signed / untrusted certificates — TLS verification disabled
   https_selfsigned:
     prober: http
     timeout: 5s
@@ -538,9 +538,9 @@ modules:
       fail_if_ssl: false
       fail_if_not_ssl: false
       tls_config:
-        insecure_skip_verify: true   # ключевая настройка для самоподписанных сертификатов
+        insecure_skip_verify: true   # key setting for self-signed certificates
 
-  # Проверка TCP-порта
+  # TCP port check
   tcp_connect:
     prober: tcp
     timeout: 5s
@@ -552,7 +552,7 @@ modules:
     icmp:
       preferred_ip_protocol: "ip4"
 
-  # DNS-проверка (пример)
+  # DNS check (example)
   dns_udp:
     prober: dns
     timeout: 5s
@@ -565,11 +565,11 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# 9. Генерация конфигурации Loki
+# 9. Loki Configuration Generation
 # ----------------------------------------------------------------------------
 
 generate_loki_config() {
-    log "Генерирую loki-config.yml..."
+    log "Generating loki-config.yml..."
     cat <<'EOF' > "${BASE_DIR}/loki/loki-config.yml"
 auth_enabled: false
 
@@ -639,11 +639,11 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# 10. Генерация datasource-провижининга Grafana
+# 10. Grafana Datasource Provisioning Generation
 # ----------------------------------------------------------------------------
 
 generate_grafana_provisioning() {
-    log "Генерирую provisioning datasources для Grafana..."
+    log "Generating Grafana provisioning datasources..."
     cat <<'EOF' > "${BASE_DIR}/grafana/provisioning/datasources/datasources.yml"
 apiVersion: 1
 
@@ -686,11 +686,11 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# 11. Генерация docker-compose.yml
+# 11. docker-compose.yml Generation
 # ----------------------------------------------------------------------------
 
 generate_compose_file() {
-    log "Генерирую docker-compose.yml..."
+    log "Generating docker-compose.yml..."
     cat <<EOF > "${COMPOSE_FILE}"
 name: observability
 
@@ -821,43 +821,43 @@ EOF
 }
 
 # ----------------------------------------------------------------------------
-# 12. Развёртывание
+# 12. Deployment
 # ----------------------------------------------------------------------------
 
 deploy_stack() {
-    log "Проверяю синтаксис docker-compose.yml..."
+    log "Checking docker-compose.yml syntax..."
     (cd "${BASE_DIR}" && docker compose config -q) \
-        || die "Ошибка в docker-compose.yml, смотри вывод выше."
+        || die "Error in docker-compose.yml, see output above."
 
-    log "Запускаю стек через docker compose (pull + up -d)..."
+    log "Starting the stack via docker compose (pull + up -d)..."
     (cd "${BASE_DIR}" && docker compose pull)
     (cd "${BASE_DIR}" && docker compose up -d)
 
-    # ВАЖНО: docker compose up -d НЕ пересоздаёт и НЕ перезапускает уже запущенный
-    # контейнер, если описание сервиса в docker-compose.yml не изменилось (образ,
-    # порты, переменные окружения). Изменение СОДЕРЖИМОГО файла, примонтированного
-    # как volume (prometheus.yml, alertmanager.yml, blackbox.yml, loki-config.yml,
-    # grafana provisioning), docker compose вообще не отслеживает — это просто файл
-    # на диске. А сами эти сервисы читают свой конфиг только при старте процесса,
-    # без hot-reload по умолчанию. Поэтому после каждой регенерации конфигов нужно
-    # явно перезапустить контейнеры, которые их читают, иначе они продолжат работать
-    # со старым конфигом из памяти, хотя на диске давно всё актуально.
-    log "Перезапускаю сервисы, читающие конфиги из файлов, чтобы применить актуальные настройки..."
+    # IMPORTANT: docker compose up -d does NOT recreate or restart an already running
+    # container if its service definition in docker-compose.yml hasn't changed (image,
+    # ports, environment variables). Docker compose does not track changes to the CONTENT
+    # of files mounted as volumes (prometheus.yml, alertmanager.yml, blackbox.yml, loki-config.yml,
+    # grafana provisioning) — they are simply files on disk. Furthermore, these services
+    # only read their configuration when the process starts, with no hot-reload by default.
+    # Therefore, after every configuration regeneration, you must explicitly restart the
+    # containers that read them; otherwise, they will continue running with the old configuration
+    # from memory, even though the disk has been updated long ago.
+    log "Restarting services that read config files to apply current settings..."
     (cd "${BASE_DIR}" && docker compose restart prometheus alertmanager blackbox-exporter loki grafana)
 
-    log "Стек запущен. Жду 10 секунд перед проверкой состояния..."
+    log "Stack started. Waiting 10 seconds before checking status..."
     sleep 10
     (cd "${BASE_DIR}" && docker compose ps)
 }
 
 # ----------------------------------------------------------------------------
-# 13. Проверка здоровья сервисов
+# 13. Service Health Check
 # ----------------------------------------------------------------------------
 
 health_check() {
     # shellcheck disable=SC1090
     source "${ENV_FILE}"
-    log "Проверка доступности сервисов..."
+    log "Checking service availability..."
 
     local endpoints=(
         "Prometheus|http://localhost:${PROMETHEUS_PORT}/-/healthy"
@@ -881,7 +881,7 @@ health_check() {
 }
 
 # ----------------------------------------------------------------------------
-# 14. Итоговая сводка
+# 14. Final Summary
 # ----------------------------------------------------------------------------
 
 print_summary() {
@@ -892,44 +892,44 @@ print_summary() {
     cat <<EOF
 
 ===============================================================================
- Observability-стек развёрнут.
+ Observability stack deployed.
 ===============================================================================
- Каталог стека:      ${BASE_DIR}
- Файл переменных:    ${ENV_FILE}
- Compose-файл:        ${COMPOSE_FILE}
+ Stack directory:    ${BASE_DIR}
+ Environment file:   ${ENV_FILE}
+ Compose file:       ${COMPOSE_FILE}
 
- Доступ к сервисам:
-   Grafana:            http://${ip}:${GRAFANA_PORT}
-                        логин: ${GF_SECURITY_ADMIN_USER} / пароль: ${GF_SECURITY_ADMIN_PASSWORD}
-   Prometheus:         http://${ip}:${PROMETHEUS_PORT}
-   Alertmanager:       http://${ip}:${ALERTMANAGER_PORT}
-   Blackbox Exporter:  http://${ip}:${BLACKBOX_PORT}
-   Node Exporter:      http://${ip}:${NODE_EXPORTER_PORT}/metrics
-   Postgres Exporter:  http://${ip}:${POSTGRES_EXPORTER_PORT}/metrics
-   Loki:               http://${ip}:${LOKI_PORT}
+ Service Access:
+    Grafana:            http://${ip}:${GRAFANA_PORT}
+                        login: ${GF_SECURITY_ADMIN_USER} / password: ${GF_SECURITY_ADMIN_PASSWORD}
+    Prometheus:         http://${ip}:${PROMETHEUS_PORT}
+    Alertmanager:       http://${ip}:${ALERTMANAGER_PORT}
+    Blackbox Exporter:  http://${ip}:${BLACKBOX_PORT}
+    Node Exporter:      http://${ip}:${NODE_EXPORTER_PORT}/metrics
+    Postgres Exporter:  http://${ip}:${POSTGRES_EXPORTER_PORT}/metrics
+    Loki:               http://${ip}:${LOKI_PORT}
 
- ВАЖНО — обязательно отредактируйте перед боевым использованием:
-   1) ${ENV_FILE}
-        - POSTGRES_EXPORTER_DSN   -> реальная строка подключения к вашей БД
-        - BLACKBOX_TARGETS        -> реальные сайты/хосты для проверки
-        - NODE_EXPORTER_TARGETS   -> дополнительные хосты, если есть
-   2) ${BASE_DIR}/alertmanager/alertmanager.yml
-        - настройте реальный канал уведомлений (email/telegram/slack/webhook)
+ IMPORTANT — make sure to edit before production use:
+    1) ${ENV_FILE}
+        - POSTGRES_EXPORTER_DSN    -> real connection string to your DB
+        - BLACKBOX_TARGETS         -> real websites/hosts to check
+        - NODE_EXPORTER_TARGETS    -> additional hosts, if any
+    2) ${BASE_DIR}/alertmanager/alertmanager.yml
+        - configure a real notification channel (email/telegram/slack/webhook)
 
-   После правки .env перезапустите скрипт (он идемпотентен) либо выполните:
-     cd ${BASE_DIR} && docker compose up -d --force-recreate prometheus postgres-exporter
+    After editing .env, re-run the script (it is idempotent) or execute:
+      cd ${BASE_DIR} && docker compose up -d --force-recreate prometheus postgres-exporter
 
- Самоподписанные сертификаты:
-   Для HTTPS-целей с self-signed сертификатами Blackbox использует модуль
-   "https_selfsigned" (tls_config.insecure_skip_verify: true), настроенный
-   в ${BASE_DIR}/blackbox/blackbox.yml и уже подключённый в prometheus.yml
-   как job "blackbox-https-selfsigned".
+ Self-signed certificates:
+    For HTTPS targets with self-signed certificates, Blackbox uses the
+    "https_selfsigned" module (tls_config.insecure_skip_verify: true), configured
+    in ${BASE_DIR}/blackbox/blackbox.yml and already included in prometheus.yml
+    as the "blackbox-https-selfsigned" job.
 
- Полезные команды:
-   Логи:        cd ${BASE_DIR} && docker compose logs -f [сервис]
-   Статус:      cd ${BASE_DIR} && docker compose ps
-   Остановить:  cd ${BASE_DIR} && docker compose down
-   Обновить:    cd ${BASE_DIR} && docker compose pull && docker compose up -d
+ Useful commands:
+    Logs:       cd ${BASE_DIR} && docker compose logs -f [service]
+    Status:     cd ${BASE_DIR} && docker compose ps
+    Stop:       cd ${BASE_DIR} && docker compose down
+    Update:     cd ${BASE_DIR} && docker compose pull && docker compose up -d
 ===============================================================================
 EOF
 }
