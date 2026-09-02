@@ -48,6 +48,7 @@ ID	Dashboard
 1860	Node Exporter Full
 7587	Prometheus Blackbox Exporter
 9628	PostgreSQL Database
+13639   Logs/App Loki Dashboard
 IDs are current as of the script's creation—verify on [grafana.com/dashboards](https://grafana.com/dashboards) that the dashboard still exists and is compatible with your version of Grafana/exporters.
 
 Self-Signed Certificates
