@@ -1,68 +1,290 @@
 Grafana Observability Stack Deploy Script
 
 A Bash script for automated deployment of an observability stack on Ubuntu 24.04 LTS using Docker Compose:
+
+
+
+
+
 Prometheus — Metric collection
+
+
+
 Alertmanager — Alerting with Telegram notifications
+
+
+
 Blackbox Exporter — HTTP(S)/ICMP target availability checks, including sites with self-signed certificates
+
+
+
 Node Exporter — Host metrics (CPU, RAM, disk, network)
+
+
+
 Postgres Exporter — PostgreSQL metrics
+
+
+
 Loki — Log aggregation
+
+
+
 Grafana — Visualization, featuring auto-provisioning of datasources (Prometheus, Alertmanager, Loki)
+
 The script is idempotent: re-running it is safe, configurations are re-generated from .env, and existing data in Docker volumes remains intact.
 
 Requirements
+
+
+
+
+
 Ubuntu 24.04 LTS (not tested on other versions or distributions)
+
+
+
 Root privileges (sudo)
-Server network access to: archive.ubuntu.com / Ubuntu mirrors, Docker Hub (registry-1.docker.io, auth.docker.io)
+
+
+
+Server network access to:
+
+
+
+
+
+archive.ubuntu.com / Ubuntu mirrors
+
+
+
+Docker Hub (registry-1.docker.io, auth.docker.io)
+
 If the network is segmented, see the Troubleshooting section.
 
 Quick Start
+
 git clone <URL_of_this_repository>
 cd <repository_directory>
 chmod +x deploy-observability-stack.sh
 sudo ./deploy-observability-stack.sh
+
 Upon the first run, the script will:
+
+
+
+
+
 Install Docker and the Docker Compose plugin from standard Ubuntu repositories (docker.io + docker-compose-v2).
+
+
+
 Create /opt/observability with all configuration files.
+
+
+
 Generate /opt/observability/.env containing a random Grafana password and placeholder values for the database, targets, and Telegram.
+
+
+
 Spin up the entire stack (docker compose pull && up -d).
+
+
+
 Perform a health check on all services and output a summary containing addresses and credentials.
+
+
+
 Important: After the initial run, be sure to edit /opt/observability/.env (refer to .env.example as a template) and re-run the script.
 
+
+
 Configuration
-All settings are managed via /opt/observability/.env. A complete list of variables with comments can be found in .env.example. Key variables include:
-Variable	Description
-POSTGRES_EXPORTER_DSN	PostgreSQL connection string (pg_monitor permissions required)
-BLACKBOX_TARGETS	Comma-separated HTTP(S) addresses for availability checks
-NODE_EXPORTER_TARGETS	Hosts running node-exporter, if multiple exist
-BLACKBOX_ICMP_TARGETS	Dedicated list for ICMP ping checks (independent of others)
-TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID	Alert channel configuration for Alertmanager
-After modifying .env, run the script again—it will automatically re-generate configurations and restart the necessary containers.
-Note: docker compose up -d does not re-read already mounted configuration files and will not restart a container if its service definition in docker-compose.yml remains unchanged. Therefore, the script explicitly restarts prometheus, alertmanager, blackbox-exporter, loki, and grafana after generating configurations. If you edit configs manually, restart services using: docker compose restart <service>.
+
+All settings are managed via /opt/observability/.env. A complete list of variables with comments can be found in .env.example.
+
+Key variables include:
+
+
+
+
+
+
+
+Variable
+
+
+
+Description
+
+
+
+
+
+POSTGRES_EXPORTER_DSN
+
+
+
+PostgreSQL connection string (pg_monitor permissions required)
+
+
+
+
+
+BLACKBOX_TARGETS
+
+
+
+Comma-separated HTTP(S) addresses for availability checks
+
+
+
+
+
+NODE_EXPORTER_TARGETS
+
+
+
+Hosts running node-exporter, if multiple exist
+
+
+
+
+
+BLACKBOX_ICMP_TARGETS
+
+
+
+Dedicated list for ICMP ping checks (independent of others)
+
+
+
+
+
+TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+
+
+
+Alert channel configuration for Alertmanager
+
+After modifying .env, run the script again — it will automatically re-generate configurations and restart the necessary containers.
+
+
+
+Note: docker compose up -d does not re-read already mounted configuration files and will not restart a container if its service definition in docker-compose.yml remains unchanged. Therefore, the script explicitly restarts prometheus, alertmanager, blackbox-exporter, loki, and grafana after generating configurations. If you edit configs manually, restart services using:
+
+docker compose restart
+
+
 
 Grafana Dashboards
+
 The script intentionally excludes automatic community dashboard downloads to prevent issues in segmented networks where grafana.com might be unreachable, and because provisioned dashboards are difficult to remove from the UI.
-Import them manually:
-Go to Dashboards → New → Import, enter the ID, and select the Prometheus datasource:
-ID	Dashboard
-1860	Node Exporter Full
-7587	Prometheus Blackbox Exporter
-9628	PostgreSQL Database
-13639   Logs/App Loki Dashboard
-IDs are current as of the script's creation—verify on [grafana.com/dashboards](https://grafana.com/dashboards) that the dashboard still exists and is compatible with your version of Grafana/exporters.
+
+Import them manually: go to Dashboards → New → Import, enter the ID, and select the Prometheus datasource.
+
+
+
+
+
+
+
+ID
+
+
+
+Dashboard
+
+
+
+
+
+1860
+
+
+
+Node Exporter Full
+
+
+
+
+
+7587
+
+
+
+Prometheus Blackbox Exporter
+
+
+
+
+
+9628
+
+
+
+PostgreSQL Database
+
+
+
+
+
+13639
+
+
+
+Logs/App Loki Dashboard
+
+Dashboard IDs are current as of the script's creation — verify on grafana.com/dashboards that the dashboard still exists and is compatible with your version of Grafana/exporters.
 
 Self-Signed Certificates
+
 Blackbox Exporter uses a single https_selfsigned module (tls_config.insecure_skip_verify: true) for all targets specified in BLACKBOX_TARGETS. It handles both https:// (including self-signed certificates) and http:// targets seamlessly (TLS settings are simply ignored for unencrypted targets).
+
 A separate strict TLS mode has been intentionally omitted, as it previously caused metric duplication for identical targets.
 
+Client Machine Agents
+
+To collect metrics and logs from other (client) machines, install node_exporter and promtail on each of them and point them at the central server. Installer scripts are provided in this repository.
+
+Node Exporter — Quick Install
+
+Installs node_exporter v1.8.2 as a systemd service under a dedicated node_exporter system user.
+
+chmod +x install-node-exporter.sh
+sudo ./install-node-exporter.sh
+
+After installation, add the client machine's address to NODE_EXPORTER_TARGETS in the central server's .env file and re-run deploy-observability-stack.sh.
+
+
+
+Note: if ufw/iptables on the client blocks incoming traffic, allow access to port 9100 from the observability server (see Troubleshooting).
+
+
+
+Promtail — Quick Install
+
+Installs promtail v2.9.8 as a systemd service and configures it to ship system logs, auth.log, and the systemd journal to a central Loki instance.
+
+Before running, open install-promtail.sh and set LOKI_SERVER_IP to the address of your central Loki/observability server:
+
+LOKI_SERVER_IP="YOUR_CENTRAL_LOKI_IP" # <-- replace with your server's IP
+
+Then run:
+
+chmod +x install-promtail.sh
+sudo ./install-promtail.sh
+
+Promtail will push logs to http://${LOKI_SERVER_IP}:3100/loki/api/v1/push and label them with the client's hostname, so multiple client machines can be distinguished in Grafana/Loki.
+
 Post-Deployment Structure
-Plaintext
+
 /opt/observability/
-├── .env                              # All settings
+├── .env                          # All settings
 ├── docker-compose.yml
 ├── prometheus/
-│   ├── prometheus.yml                # Regenerated by the script
-│   └── alert.rules.yml               # Created once, then untouched — edit manually
+│   ├── prometheus.yml            # Regenerated by the script
+│   └── alert.rules.yml           # Created once, then untouched — edit manually
 ├── alertmanager/
 │   └── alertmanager.yml
 ├── blackbox/
@@ -75,10 +297,23 @@ Plaintext
     └── dashboards/
         └── dashboards.yml
 
+
+
 Troubleshooting
-Segmented network / no access to download.docker.com — The script installs Docker from standard Ubuntu repositories, so no external third-party repository is required. Ensure that Ubuntu mirrors and Docker Hub are accessible.
-apt update fails with a Segmentation fault on the command-not-found hook — This is a known bug in certain Ubuntu 24.04 builds (cnf-update-db). The script disables this hook automatically (#clear APT::Update::Post-Invoke-Success; in /etc/apt/apt.conf.d/).
-node-exporter shows as DOWN / context deadline exceeded — node-exporter runs in network_mode: host (to capture accurate host metrics), while Prometheus runs inside a separate Docker bridge network. If ufw or iptables is enabled on the host with an INPUT DROP policy, traffic from the bridge subnet to port 9100 may be blocked.
-Solution: Allow the bridge subnet access to port 9100:
+
+Segmented network / no access to download.docker.com
+The script installs Docker from standard Ubuntu repositories, so no external third-party repository is required. Ensure that Ubuntu mirrors and Docker Hub are accessible.
+
+apt update fails with a Segmentation fault on the command-not-found hook
+This is a known bug in certain Ubuntu 24.04 builds (cnf-update-db). The script disables this hook automatically (#clear APT::Update::Post-Invoke-Success; in /etc/apt/apt.conf.d/).
+
+node-exporter shows as DOWN / context deadline exceeded
+node-exporter runs in network_mode: host (to capture accurate host metrics), while Prometheus runs inside a separate Docker bridge network. If ufw or iptables is enabled on the host with an INPUT DROP policy, traffic from the bridge subnet to port 9100 may be blocked.
+
+Solution: allow the bridge subnet access to port 9100:
+
 docker network inspect observability_monitoring | grep -i subnet
-ufw allow from <SUBNET> to any port 9100 proto tcp
+ufw allow from <subnet> to any port 9100 proto tcp
+
+
+
